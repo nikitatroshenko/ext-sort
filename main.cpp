@@ -34,7 +34,13 @@ int cmp_ll(const void *l, const void *r)
     uint64_t left = *(uint64_t *) l;
     uint64_t right = *(uint64_t *) r;
 
-    return static_cast<int>(left - right); // todo: overflow
+    if (left < right) {
+        return -1;
+    } else if (left > right) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
 #ifndef MAX_PATH
@@ -69,7 +75,7 @@ struct run_pool_t {
         for (size_t i = 0; i < size; i++) {
             auto run = new run_t(id_counter++);
             const char *name = run->get_name();
-            
+
             run->file = fopen(name, "wb+");
             setvbuf(run->file, nullptr, _IONBF, 0);
             fwrite(&zero, sizeof zero, 1, run->file);
@@ -201,7 +207,7 @@ struct merger_t {
                     fwrite(result_block, sizeof *result_block, block_size * 2, result);
                     k = 0;
                     resp = result_block;
-                    fflush(result);
+//                    fflush(result);
                 }
             }
         }
@@ -214,20 +220,20 @@ struct merger_t {
         if (j != 0) {
             fwrite(rp, sizeof *rp, j, result);
         }
-        fflush(result);
+//        fflush(result);
         while (left_read < left_size) {
             i = (left_size - left_read < ram_size) ? (left_size - left_read) : ram_size;
             fread(ram, sizeof *ram, i, left);
             left_read += i;
             fwrite(ram, sizeof *ram, i, result);
-            fflush(result);
+//            fflush(result);
         }
         while (right_read < right_size) {
             j = (right_size - right_read < ram_size) ? (right_size - right_read) : ram_size;
             fread(ram, sizeof *ram, j, right);
             right_read += j;
             fwrite(ram, sizeof *ram, j, result);
-            fflush(result);
+//            fflush(result);
         }
     }
 
@@ -276,14 +282,14 @@ struct merger_t {
 
 int main(int argc, char const *argv[])
 {
-	FILE *in = fopen(DEFAULT_INPUT_PATTERN, "rb");
-	FILE *out = fopen(DEFAULT_OUTPUT, "wb");
+    FILE *in = fopen(DEFAULT_INPUT_PATTERN, "rb");
+    FILE *out = fopen(DEFAULT_OUTPUT, "wb");
 
     merger_t merger = merger_t(DEFAULT_MEMORY_SIZE);
 
     merger.do_merge_sort(in, out);
 
-	fclose(in);
-	fclose(out);
+    fclose(in);
+    fclose(out);
     return 0;
 }
