@@ -20,6 +20,10 @@
 
 #define DATA_START_OFFSET 8
 
+#ifndef DEFAULT_MERGE_RANK
+#define DEFAULT_MERGE_RANK 2
+#endif
+
 #define DEFAULT_INPUT_PATTERN ("input.bin")
 #define DEFAULT_OUTPUT ("output.bin")
 
@@ -29,8 +33,7 @@
 #define RUN_NAME_PATTERN "run.%d.bin"
 #endif
 
-int cmp_ll(const void *l, const void *r)
-{
+int cmp_ll(const void *l, const void *r) {
     uint64_t left = *(uint64_t *) l;
     uint64_t right = *(uint64_t *) r;
 
@@ -51,10 +54,10 @@ struct run_t {
     FILE *file;
     int id;
 
-    explicit run_t(int id): file(nullptr), id(id) {}
+    explicit run_t(int id) : file(nullptr), id(id) {}
 
     const char *get_name() {
-        static char name[MAX_PATH] {};
+        static char name[MAX_PATH]{};
 
         sprintf(name, RUN_NAME_PATTERN, id);
         return name;
@@ -122,21 +125,78 @@ struct run_pool_t {
 
 int run_pool_t::id_counter = 0;
 
+// Brand new bicycle
+struct block_t {
+    FILE *external_storage;
+    uint64_t *internal_storage;
+    uint64_t external_size;
+    uint64_t internal_capacity;
+    uint64_t internal_size;
+    uint64_t external_storage_offset;
+    uint64_t *internal_storage_ptr;
+
+    block_t(FILE *external_storage, uint64_t *internal_storage, uint64_t external_size, uint64_t internal_capacity,
+            uint64_t internal_size, uint64_t external_storage_offset, uint64_t *internal_storage_ptr)
+            : external_storage(external_storage), internal_storage(internal_storage), external_size(external_size),
+              internal_capacity(internal_capacity), internal_size(internal_size),
+              external_storage_offset(external_storage_offset), internal_storage_ptr(internal_storage_ptr) {}
+
+
+    static block_t *create_input(FILE *external_storage, uint64_t *internal_storage, uint64_t internal_capacity) {
+        auto *result = new block_t(external_storage, internal_storage, 0, internal_capacity, 0, 0, internal_storage);
+        fread(&result->external_size, sizeof result->external_size, 1, external_storage);
+        return result;
+    }
+
+    static block_t *create_output(FILE *external_storage,
+            uint64_t external_size,
+            uint64_t *internal_storage,
+            uint64_t internal_capacity) {
+        auto *result = new block_t(external_storage, internal_storage, external_size, internal_capacity, 0, 0, internal_storage);
+        fwrite(&result->external_size, sizeof result->external_size, 1, external_storage);
+        return result;
+    }
+
+    bool empty() const {
+        return !internal_size;
+    }
+
+    bool has_external_data() const {
+        return external_storage_offset < external_size;
+    }
+
+    void flush() {
+        fwrite(internal_storage, sizeof *internal_storage, internal_capacity, external_storage);
+        internal_size = 0;
+        internal_storage_ptr = internal_storage;
+//        fflush(external_storage);
+    }
+
+    void next_block() {
+        internal_storage_ptr = internal_storage;
+        internal_size = (external_size - external_storage_offset < internal_capacity)
+                ? (external_size - external_storage_offset)
+                : internal_capacity;
+        fread(internal_storage_ptr, sizeof *internal_storage, internal_size, external_storage);
+        external_storage_offset += internal_size;
+    }
+
+    void resize_buffer(uint64_t *internal_storage, uint64_t internal_capacity) {
+        this->internal_storage = internal_storage;
+        this->internal_storage_ptr = internal_storage;
+        this->internal_capacity = internal_capacity;
+        this->internal_size = 0;
+    }
+};
+
 struct merger_t {
     uint64_t *ram;
-    size_t block_size;
     size_t ram_size;
-    run_pool_t *outs;
-    run_pool_t *ins;
     run_pool_t *runs;
 
     explicit merger_t(size_t ram_size) :
-            block_size(ram_size / 4),
             ram_size(ram_size),
-            outs(nullptr),
-            ins(nullptr),
-            runs(nullptr)
-    {
+            runs(nullptr) {
         ram = new uint64_t[ram_size];
     }
 
@@ -161,80 +221,65 @@ struct merger_t {
     }
 
     void merge(FILE *left, FILE *right, FILE *result) {
-        uint64_t *left_block = ram;
-        uint64_t *right_block = ram + block_size;
-        uint64_t *result_block = ram + 2 * block_size;
-        uint64_t left_size;
-        uint64_t right_size;
-        uint64_t result_size;
+        auto block_size = ram_size / 2 / 2;
+        auto *left_block_t = block_t::create_input(left, ram, block_size);
+        auto *right_block_t = block_t::create_input(right, ram + block_size, block_size);
+        auto *result_block_t = block_t::create_output(
+                result,
+                left_block_t->external_size + right_block_t->external_size,
+                ram + ram_size / 2,
+                ram_size / 2);
 
-        fread(&left_size, sizeof left_size, 1, left);
-        fread(&right_size, sizeof right_size, 1, right);
-        result_size = left_size + right_size;
-        fwrite(&result_size, sizeof result_size, 1, result);
-
-        uint64_t left_read = 0;
-        uint64_t right_read = 0;
-        uint64_t i = 0;
-        uint64_t j = 0;
-        uint64_t k = 0;
-        uint64_t *lp = left_block;
-        uint64_t *rp = right_block;
-        uint64_t *resp = result_block;
-        while ((left_read < left_size || i != 0) && (right_read < right_size || j != 0)) {
-            if (i == 0) {
-                lp = left_block;
-                i = (left_size - left_read < block_size) ? (left_size - left_read) : block_size;
-                fread(left_block, sizeof *left_block, i, left);
-                left_read += i;
+        while ((!left_block_t->empty() || left_block_t->has_external_data())
+                && (!right_block_t->empty() || right_block_t->has_external_data())) {
+            if (left_block_t->empty()) {
+                left_block_t->next_block();
             }
-            if (j == 0) {
-                rp = right_block;
-                j = (right_size - right_read < block_size) ? (right_size - right_read) : block_size;
-                fread(right_block, sizeof *right_block, j, right);
-                right_read += j;
+            if (right_block_t->empty()) {
+                right_block_t->next_block();
             }
-            while ((i != 0) && (j != 0)) {
-                if (*lp <= *rp) {
-                    i--;
-                    *(resp++) = *(lp++);
+            while (!left_block_t->empty() && !right_block_t->empty()) {
+                if (*left_block_t->internal_storage_ptr <= *right_block_t->internal_storage_ptr) {
+                    left_block_t->internal_size--;
+                    *(result_block_t->internal_storage_ptr++) = *(left_block_t->internal_storage_ptr++);
                 } else {
-                    j--;
-                    *(resp++) = *(rp++);
+                    right_block_t->internal_size--;
+                    *(result_block_t->internal_storage_ptr++) = *(right_block_t->internal_storage_ptr++);
                 }
-                k++;
-                if (k == block_size * 2) {
-                    fwrite(result_block, sizeof *result_block, block_size * 2, result);
-                    k = 0;
-                    resp = result_block;
-//                    fflush(result);
+                result_block_t->internal_size++;
+                if (result_block_t->internal_size == block_size * 2) {
+                    result_block_t->flush();
                 }
             }
         }
-        if (k != 0) {
-            fwrite(result_block, sizeof *result_block, k, result);
+        if (!result_block_t->empty()) {
+            fwrite(result_block_t->internal_storage, sizeof *result_block_t->internal_storage, result_block_t->internal_size, result_block_t->external_storage);
         }
-        if (i != 0) {
-            fwrite(lp, sizeof *lp, i, result);
+        if (!left_block_t->empty()) {
+            fwrite(left_block_t->internal_storage_ptr, sizeof *left_block_t->internal_storage_ptr, left_block_t->internal_size, result_block_t->external_storage);
         }
-        if (j != 0) {
-            fwrite(rp, sizeof *rp, j, result);
+        if (!right_block_t->empty()) {
+            fwrite(right_block_t->internal_storage_ptr, sizeof *right_block_t->internal_storage_ptr, right_block_t->internal_size, result_block_t->external_storage);
         }
-//        fflush(result);
-        while (left_read < left_size) {
-            i = (left_size - left_read < ram_size) ? (left_size - left_read) : ram_size;
-            fread(ram, sizeof *ram, i, left);
-            left_read += i;
-            fwrite(ram, sizeof *ram, i, result);
-//            fflush(result);
+//        fflush(result_block_t->external_storage);
+        while (left_block_t->has_external_data()) {
+            left_block_t->internal_size = (left_block_t->external_size - left_block_t->external_storage_offset < ram_size) ? (left_block_t->external_size - left_block_t->external_storage_offset) : ram_size;
+            fread(ram, sizeof *ram, left_block_t->internal_size, left_block_t->external_storage);
+            left_block_t->external_storage_offset += left_block_t->internal_size;
+            fwrite(ram, sizeof *ram, left_block_t->internal_size, result_block_t->external_storage);
+//            fflush(result_block_t->external_storage);
         }
-        while (right_read < right_size) {
-            j = (right_size - right_read < ram_size) ? (right_size - right_read) : ram_size;
-            fread(ram, sizeof *ram, j, right);
-            right_read += j;
-            fwrite(ram, sizeof *ram, j, result);
-//            fflush(result);
+        while (right_block_t->has_external_data()) {
+            right_block_t->internal_size = (right_block_t->external_size - right_block_t->external_storage_offset < ram_size) ? (right_block_t->external_size - right_block_t->external_storage_offset) : ram_size;
+            fread(ram, sizeof *ram, right_block_t->internal_size, right_block_t->external_storage);
+            right_block_t->external_storage_offset += right_block_t->internal_size;
+            fwrite(ram, sizeof *ram, right_block_t->internal_size, result_block_t->external_storage);
+//            fflush(result_block_t->external_storage);
         }
+
+        delete left_block_t;
+        delete right_block_t;
+        delete result_block_t;
     }
 
     void do_merge_sort(FILE *in, FILE *out) {
@@ -280,8 +325,7 @@ struct merger_t {
     }
 };
 
-int main(int argc, char const *argv[])
-{
+int main(int argc, char const *argv[]) {
     FILE *in = fopen(DEFAULT_INPUT_PATTERN, "rb");
     FILE *out = fopen(DEFAULT_OUTPUT, "wb");
 
