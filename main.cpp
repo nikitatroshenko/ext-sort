@@ -209,44 +209,43 @@ struct merger_t {
     void do_merge_sort(FILE *in, FILE *out) {
         split_into_runs(in);
 
-        run_t *result = runs->get(ram + ram_size / 2, sizeof *ram, ram_size / 2);
-        run_t *left;
-        run_t *right;
-
         const size_t rank = 2;
-        if (runs->size() == 0) {
-            fseek(in, 0, SEEK_SET);
-            FILE *files[1] = {in};
-            merge(files, 1, out);
-            return;
-        }
-        if (runs->size() == 1) {
-            left = runs->get(ram, sizeof *ram, ram_size / 4);
-            FILE *files[1] = {left->file};
-            merge(files, 1, out); // result is a file with empty sequence;
-            runs->release(left);
-            runs->release(result);
-            return;
-        }
-        while (runs->size() > 2) {
-            left = runs->get(ram, sizeof *ram, ram_size / 4);
-            right = runs->get(ram + ram_size / 4, sizeof *ram, ram_size / 4);
+        size_t block_size = ram_size / (rank + 1);
+        auto *result_block = ram + rank * block_size;
 
-            FILE *files[rank] = {left->file, right->file};
-            merge(files, rank, result->file);
-            runs->put(result);
-            runs->release(left);
-            result = right;
-            freopen(result->get_name(), "rb+", result->file);
-            setvbuf(result->file, (char *) (ram + ram_size / 2), _IOFBF, ram_size / 2 * sizeof *ram);
+        run_t *result = runs->get(result_block, sizeof *ram, block_size);
+        run_t *left = nullptr;
+        run_t *right = nullptr;
+
+        if (runs->size() == 0) {
+            // should never happen since N > 1
+            fseek(in, 0, SEEK_SET);
+            merge(&in, 1, out);
+            return;
         }
-        left = runs->get(ram, sizeof *ram, ram_size / 4);
-        right = runs->get(ram + ram_size / 4, sizeof *ram, ram_size / 4);
-        FILE *files[rank] = {left->file, right->file};
-        merge(files, rank, out);
-        runs->release(result);
-        runs->release(left);
-        runs->release(right);
+        FILE **files = new FILE *[rank];
+        auto **used_runs = new run_t*[rank];
+        while (runs->size() > 1) {
+            size_t files_cnt = 0;
+            uint64_t *block_start = ram;
+//
+            for (files_cnt = 0; (files_cnt < rank) && (runs->size() != 0); files_cnt++, block_start += block_size) {
+                used_runs[files_cnt] = runs->get(block_start, sizeof *block_start, block_size);
+                files[files_cnt] = used_runs[files_cnt]->file;
+            }
+
+            merge(files, files_cnt, result->file);
+            runs->put(result);
+            for (size_t i = 1; i < files_cnt; i++) {
+                runs->release(used_runs[i]);
+            }
+            result = used_runs[0];
+            freopen(result->get_name(), "rb+", result->file);
+            setvbuf(result->file, (char *) block_start, _IOFBF, block_size * sizeof *block_start);
+        }
+        left = runs->get(ram, sizeof *ram, ram_size);
+        merge(&left->file, 1, out);
+        delete[] files;
     }
 
     ~merger_t() {
