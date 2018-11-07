@@ -161,18 +161,40 @@ struct block_t {
         return !internal_size;
     }
 
+    bool full() const {
+        return internal_size == internal_capacity;
+    }
+
     bool has_external_data() const {
         return external_storage_offset < external_size;
     }
 
     void flush() {
-        fwrite(internal_storage, sizeof *internal_storage, internal_capacity, external_storage);
+        fwrite(internal_storage, sizeof *internal_storage, internal_size, external_storage);
         internal_size = 0;
         internal_storage_ptr = internal_storage;
 //        fflush(external_storage);
     }
 
-    void next_block() {
+    void move_to(block_t *dest) {
+        fwrite(internal_storage_ptr, sizeof *internal_storage_ptr, internal_size, dest->external_storage);
+        internal_size = 0;
+        internal_storage_ptr = internal_storage + internal_capacity;
+    }
+
+    uint64_t next() {
+        assert(!empty());
+        internal_size--;
+        return *(internal_storage_ptr++);
+    }
+
+    void push(uint64_t v) {
+        assert(!full());
+        internal_size++;
+        *(internal_storage_ptr++) = v;
+    }
+
+    void read_next_block() {
         internal_storage_ptr = internal_storage;
         internal_size = (external_size - external_storage_offset < internal_capacity)
                 ? (external_size - external_storage_offset)
@@ -181,6 +203,11 @@ struct block_t {
         external_storage_offset += internal_size;
     }
 
+    /**
+     * Changes internal buffer size and location. Former buffer contains are lost
+     * @param internal_storage  new buffer location
+     * @param internal_capacity new buffer size
+     */
     void resize_buffer(uint64_t *internal_storage, uint64_t internal_capacity) {
         this->internal_storage = internal_storage;
         this->internal_storage_ptr = internal_storage;
@@ -231,50 +258,43 @@ struct merger_t {
                 ram_size / 2);
 
         while ((!left_block_t->empty() || left_block_t->has_external_data())
-                && (!right_block_t->empty() || right_block_t->has_external_data())) {
+               && (!right_block_t->empty() || right_block_t->has_external_data())) {
             if (left_block_t->empty()) {
-                left_block_t->next_block();
+                left_block_t->read_next_block();
             }
             if (right_block_t->empty()) {
-                right_block_t->next_block();
+                right_block_t->read_next_block();
             }
             while (!left_block_t->empty() && !right_block_t->empty()) {
                 if (*left_block_t->internal_storage_ptr <= *right_block_t->internal_storage_ptr) {
-                    left_block_t->internal_size--;
-                    *(result_block_t->internal_storage_ptr++) = *(left_block_t->internal_storage_ptr++);
+                    result_block_t->push(left_block_t->next());
                 } else {
-                    right_block_t->internal_size--;
-                    *(result_block_t->internal_storage_ptr++) = *(right_block_t->internal_storage_ptr++);
+                    result_block_t->push(right_block_t->next());
                 }
-                result_block_t->internal_size++;
-                if (result_block_t->internal_size == block_size * 2) {
+                if (result_block_t->full()) {
                     result_block_t->flush();
                 }
             }
         }
         if (!result_block_t->empty()) {
-            fwrite(result_block_t->internal_storage, sizeof *result_block_t->internal_storage, result_block_t->internal_size, result_block_t->external_storage);
+            result_block_t->flush();
         }
         if (!left_block_t->empty()) {
-            fwrite(left_block_t->internal_storage_ptr, sizeof *left_block_t->internal_storage_ptr, left_block_t->internal_size, result_block_t->external_storage);
+            left_block_t->move_to(result_block_t);
         }
         if (!right_block_t->empty()) {
-            fwrite(right_block_t->internal_storage_ptr, sizeof *right_block_t->internal_storage_ptr, right_block_t->internal_size, result_block_t->external_storage);
+            right_block_t->move_to(result_block_t);
         }
+        left_block_t->resize_buffer(ram, ram_size);
+        right_block_t->resize_buffer(ram, ram_size);
 //        fflush(result_block_t->external_storage);
         while (left_block_t->has_external_data()) {
-            left_block_t->internal_size = (left_block_t->external_size - left_block_t->external_storage_offset < ram_size) ? (left_block_t->external_size - left_block_t->external_storage_offset) : ram_size;
-            fread(ram, sizeof *ram, left_block_t->internal_size, left_block_t->external_storage);
-            left_block_t->external_storage_offset += left_block_t->internal_size;
-            fwrite(ram, sizeof *ram, left_block_t->internal_size, result_block_t->external_storage);
-//            fflush(result_block_t->external_storage);
+            left_block_t->read_next_block();
+            left_block_t->move_to(result_block_t);
         }
         while (right_block_t->has_external_data()) {
-            right_block_t->internal_size = (right_block_t->external_size - right_block_t->external_storage_offset < ram_size) ? (right_block_t->external_size - right_block_t->external_storage_offset) : ram_size;
-            fread(ram, sizeof *ram, right_block_t->internal_size, right_block_t->external_storage);
-            right_block_t->external_storage_offset += right_block_t->internal_size;
-            fwrite(ram, sizeof *ram, right_block_t->internal_size, result_block_t->external_storage);
-//            fflush(result_block_t->external_storage);
+            right_block_t->read_next_block();
+            right_block_t->move_to(result_block_t);
         }
 
         delete left_block_t;
