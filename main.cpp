@@ -166,9 +166,7 @@ struct merger_t {
         }
     }
 
-    void merge(FILE *left, FILE *right, FILE *result) {
-        const size_t rank = 2;
-        FILE *files[rank] = {left, right};
+    void merge(FILE *files[], size_t rank, FILE *result) {
         struct input { FILE *file; uint64_t val; uint64_t size; bool read;} *inputs = new input[rank];
 
         for (size_t i = 0; i < rank; i++) {
@@ -215,14 +213,17 @@ struct merger_t {
         run_t *left;
         run_t *right;
 
+        const size_t rank = 2;
         if (runs->size() == 0) {
             fseek(in, 0, SEEK_SET);
-            merge(in, result->file, out);
+            FILE *files[1] = {in};
+            merge(files, 1, out);
             return;
         }
         if (runs->size() == 1) {
             left = runs->get(ram, sizeof *ram, ram_size / 4);
-            merge(left->file, result->file, out); // result is a file with empty sequence;
+            FILE *files[1] = {left->file};
+            merge(files, 1, out); // result is a file with empty sequence;
             runs->release(left);
             runs->release(result);
             return;
@@ -231,7 +232,8 @@ struct merger_t {
             left = runs->get(ram, sizeof *ram, ram_size / 4);
             right = runs->get(ram + ram_size / 4, sizeof *ram, ram_size / 4);
 
-            merge(left->file, right->file, result->file);
+            FILE *files[rank] = {left->file, right->file};
+            merge(files, rank, result->file);
             runs->put(result);
             runs->release(left);
             result = right;
@@ -240,7 +242,8 @@ struct merger_t {
         }
         left = runs->get(ram, sizeof *ram, ram_size / 4);
         right = runs->get(ram + ram_size / 4, sizeof *ram, ram_size / 4);
-        merge(left->file, right->file, out);
+        FILE *files[rank] = {left->file, right->file};
+        merge(files, rank, out);
         runs->release(result);
         runs->release(left);
         runs->release(right);
