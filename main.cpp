@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cmath>
 #include <queue>
+#include <algorithm>
 
 #ifndef DEFAULT_MEMORY_SIZE
 #define DEFAULT_MEMORY_SIZE (512)
@@ -166,58 +167,45 @@ struct merger_t {
     }
 
     void merge(FILE *left, FILE *right, FILE *result) {
-        uint64_t l = 0;
-        uint64_t r = 0;
-        uint64_t res;
+        const size_t rank = 2;
+        FILE *files[rank] = {left, right};
+        struct input { FILE *file; uint64_t val; uint64_t size; bool read;} *inputs = new input[rank];
 
-        uint64_t lsiz;
-        uint64_t rsiz;
-        uint64_t ressiz;
-
-        fread(&lsiz, sizeof lsiz, 1, left);
-        fread(&rsiz, sizeof rsiz, 1, right);
-        ressiz = lsiz + rsiz;
+        for (size_t i = 0; i < rank; i++) {
+            auto &inp = inputs[i];
+            inp = {files[i], 0, 0, false};
+            fread(&inp.size, sizeof inp.size, 1, inp.file);
+        }
+        uint64_t ressiz = 0;
+        for (size_t i = 0; i < rank; i++) {
+            auto &inp = inputs[i];
+            ressiz += inp.size;
+        }
         fwrite(&ressiz, sizeof ressiz, 1, result);
 
-        bool lread = false;
-        bool rread = false;
-        while ((lsiz || lread) && (rsiz || rread)) {
-            if (!lread && lsiz) {
-                fread(&l, sizeof l, 1, left);
-                lread = true;
-                lsiz--;
+        while (true) {
+            input *min_elem = nullptr;
+            for (size_t i = 0; i < rank; i++) {
+                auto &inp = inputs[i];
+                if (!inp.read && !inp.size) {
+                    continue;
+                }
+                if (!inp.read) {
+                    fread(&inp.val, sizeof inp.val, 1, inp.file);
+                    inp.read = true;
+                    inp.size--;
+                }
+                if ((min_elem == nullptr) || (inp.val < min_elem->val)) {
+                    min_elem = &inp;
+                }
             }
-            if (!rread && rsiz) {
-                fread(&r, sizeof r, 1, right);
-                rread = true;
-                rsiz--;
+            if (min_elem == nullptr) {
+                break;
             }
-            // by this time both l and r are initialized
-            if (r < l) {
-                rread = false;
-                fwrite(&r, sizeof r, 1, result);
-            } else {
-                lread = false;
-                fwrite(&l, sizeof l, 1, result);
-            }
+            fwrite(&min_elem->val, sizeof min_elem->val, 1, result);
+            min_elem->read = false;
         }
-        // by this time not more than one of l and r is initialized
-        while (lsiz || lread) {
-            if (!lread) {
-                fread(&l, sizeof l, 1, left);
-                lsiz--;
-            }
-            fwrite(&l, sizeof l, 1, result);
-            lread = false;
-        }
-        while (rsiz || rread) {
-            if (!rread) {
-                fread(&r, sizeof r, 1, right);
-                rsiz--;
-            }
-            fwrite(&r, sizeof r, 1, result);
-            rread = false;
-        }
+        delete[] inputs;
     }
 
     void do_merge_sort(FILE *in, FILE *out) {
