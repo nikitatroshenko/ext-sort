@@ -86,9 +86,14 @@ struct run_pool_t {
     }
 
     run_t *get() {
+        return get(nullptr, 0, 0);
+    }
+
+    run_t *get(void *buf, size_t element_size, size_t elements_cnt) {
         auto run = runs.front();
         run->file = fopen(run->get_name(), "rb+");
-        setvbuf(run->file, nullptr, _IONBF, 0);
+        size_t buf_size = element_size * elements_cnt;
+        setvbuf(run->file, (char *) buf, buf_size ? _IOFBF : _IONBF, buf_size);
         fseek(run->file, 0, SEEK_SET);
         runs.pop();
         return run;
@@ -161,86 +166,64 @@ struct merger_t {
     }
 
     void merge(FILE *left, FILE *right, FILE *result) {
-        uint64_t *left_block = ram;
-        uint64_t *right_block = ram + block_size;
-        uint64_t *result_block = ram + 2 * block_size;
-        uint64_t left_size;
-        uint64_t right_size;
-        uint64_t result_size;
+        uint64_t l = 0;
+        uint64_t r = 0;
+        uint64_t res;
 
-        fread(&left_size, sizeof left_size, 1, left);
-        fread(&right_size, sizeof right_size, 1, right);
-        result_size = left_size + right_size;
-        fwrite(&result_size, sizeof result_size, 1, result);
+        uint64_t lsiz;
+        uint64_t rsiz;
+        uint64_t ressiz;
 
-        uint64_t left_read = 0;
-        uint64_t right_read = 0;
-        uint64_t i = 0;
-        uint64_t j = 0;
-        uint64_t k = 0;
-        uint64_t *lp = left_block;
-        uint64_t *rp = right_block;
-        uint64_t *resp = result_block;
-        while ((left_read < left_size || i != 0) && (right_read < right_size || j != 0)) {
-            if (i == 0) {
-                lp = left_block;
-                i = (left_size - left_read < block_size) ? (left_size - left_read) : block_size;
-                fread(left_block, sizeof *left_block, i, left);
-                left_read += i;
+        fread(&lsiz, sizeof lsiz, 1, left);
+        fread(&rsiz, sizeof rsiz, 1, right);
+        ressiz = lsiz + rsiz;
+        fwrite(&ressiz, sizeof ressiz, 1, result);
+
+        bool lread = false;
+        bool rread = false;
+        while ((lsiz || lread) && (rsiz || rread)) {
+            if (!lread && lsiz) {
+                fread(&l, sizeof l, 1, left);
+                lread = true;
+                lsiz--;
             }
-            if (j == 0) {
-                rp = right_block;
-                j = (right_size - right_read < block_size) ? (right_size - right_read) : block_size;
-                fread(right_block, sizeof *right_block, j, right);
-                right_read += j;
+            if (!rread && rsiz) {
+                fread(&r, sizeof r, 1, right);
+                rread = true;
+                rsiz--;
             }
-            while ((i != 0) && (j != 0)) {
-                if (*lp <= *rp) {
-                    i--;
-                    *(resp++) = *(lp++);
-                } else {
-                    j--;
-                    *(resp++) = *(rp++);
-                }
-                k++;
-                if (k == block_size * 2) {
-                    fwrite(result_block, sizeof *result_block, block_size * 2, result);
-                    k = 0;
-                    resp = result_block;
-//                    fflush(result);
-                }
+            // by this time both l and r are initialized
+            if (r < l) {
+                rread = false;
+                fwrite(&r, sizeof r, 1, result);
+            } else {
+                lread = false;
+                fwrite(&l, sizeof l, 1, result);
             }
         }
-        if (k != 0) {
-            fwrite(result_block, sizeof *result_block, k, result);
+        // by this time not more than one of l and r is initialized
+        while (lsiz || lread) {
+            if (!lread) {
+                fread(&l, sizeof l, 1, left);
+                lsiz--;
+            }
+            fwrite(&l, sizeof l, 1, result);
+            lread = false;
         }
-        if (i != 0) {
-            fwrite(lp, sizeof *lp, i, result);
-        }
-        if (j != 0) {
-            fwrite(rp, sizeof *rp, j, result);
-        }
-//        fflush(result);
-        while (left_read < left_size) {
-            i = (left_size - left_read < ram_size) ? (left_size - left_read) : ram_size;
-            fread(ram, sizeof *ram, i, left);
-            left_read += i;
-            fwrite(ram, sizeof *ram, i, result);
-//            fflush(result);
-        }
-        while (right_read < right_size) {
-            j = (right_size - right_read < ram_size) ? (right_size - right_read) : ram_size;
-            fread(ram, sizeof *ram, j, right);
-            right_read += j;
-            fwrite(ram, sizeof *ram, j, result);
-//            fflush(result);
+        while (rsiz || rread) {
+            if (!rread) {
+                fread(&r, sizeof r, 1, right);
+                rsiz--;
+            }
+            fwrite(&r, sizeof r, 1, result);
+            rread = false;
         }
     }
 
     void do_merge_sort(FILE *in, FILE *out) {
         split_into_runs(in);
 
-        run_t *result = runs->get();
+        run_t *result = runs->get(ram + ram_size / 2, sizeof *ram, ram_size / 2);
         run_t *left;
         run_t *right;
 
@@ -250,24 +233,25 @@ struct merger_t {
             return;
         }
         if (runs->size() == 1) {
-            left = runs->get();
+            left = runs->get(ram, sizeof *ram, ram_size / 4);
             merge(left->file, result->file, out); // result is a file with empty sequence;
             runs->release(left);
             runs->release(result);
             return;
         }
         while (runs->size() > 2) {
-            left = runs->get();
-            right = runs->get();
+            left = runs->get(ram, sizeof *ram, ram_size / 4);
+            right = runs->get(ram + ram_size / 4, sizeof *ram, ram_size / 4);
 
             merge(left->file, right->file, result->file);
             runs->put(result);
             runs->release(left);
             result = right;
-            fseek(result->file, 0, SEEK_SET);
+            freopen(result->get_name(), "rb+", result->file);
+            setvbuf(result->file, (char *) (ram + ram_size / 2), _IOFBF, ram_size / 2 * sizeof *ram);
         }
-        left = runs->get();
-        right = runs->get();
+        left = runs->get(ram, sizeof *ram, ram_size / 4);
+        right = runs->get(ram + ram_size / 4, sizeof *ram, ram_size / 4);
         merge(left->file, right->file, out);
         runs->release(result);
         runs->release(left);
