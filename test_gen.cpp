@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <random>
+#include <cstring>
 
 #ifndef DEFAULT_BLOCK_SIZE
 #define DEFAULT_BLOCK_SIZE (1 << 20)
@@ -25,6 +26,12 @@ int main(int argc, char const *argv[])
     }
 
     size = strtoull(argv[1], nullptr, 10);
+
+    bool random_test = false;
+    if (argc > 2 && !strcmp(argv[2], "--random")) {
+        random_test = true;
+    }
+
     fwrite(&size, sizeof size, 1, input);
     auto *block = new uint64_t[DEFAULT_BLOCK_SIZE];
     uid = std::uniform_int_distribution<uint64_t>(1, size);
@@ -32,8 +39,11 @@ int main(int argc, char const *argv[])
         uint64_t written = (size - i < DEFAULT_BLOCK_SIZE) ? (size - i) : DEFAULT_BLOCK_SIZE;
 
         for (uint64_t j = 0; j < written; j++) {
-            block[j] = written - j;
-//            block[j] = uid(mt);
+            if (random_test) {
+                block[j] = uid(mt) << 32;
+            } else {
+                block[j] = (written - j) << 32;
+            }
         }
         fwrite(block, sizeof *block, written, input);
         i += written;

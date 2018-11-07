@@ -8,11 +8,11 @@
 #include <algorithm>
 
 #ifndef DEFAULT_MEMORY_SIZE
-#define DEFAULT_MEMORY_SIZE (512)
+#define DEFAULT_MEMORY_SIZE (2048)
 #endif
 
 #ifndef DEFAULT_MERGE_RANK
-#define DEFAULT_MERGE_RANK 5
+#define DEFAULT_MERGE_RANK 8
 #endif
 
 #ifndef DEFAULT_BLOCK_SIZE
@@ -84,8 +84,7 @@ struct run_pool_t {
             run->file = fopen(name, "wb+");
             setvbuf(run->file, nullptr, _IONBF, 0);
             fwrite(&zero, sizeof zero, 1, run->file);
-            fclose(run->file);
-            pool->runs.push(run);
+            pool->put(run);
         }
         return pool;
     }
@@ -99,7 +98,6 @@ struct run_pool_t {
         run->file = fopen(run->get_name(), "rb+");
         size_t buf_size = element_size * elements_cnt;
         setvbuf(run->file, (char *) buf, buf_size ? _IOFBF : _IONBF, buf_size);
-        fseek(run->file, 0, SEEK_SET);
         runs.pop();
         return run;
     }
@@ -111,8 +109,6 @@ struct run_pool_t {
 
     void release(run_t *run) {
         fclose(run->file);
-        // remove(run->name);
-
         delete run;
     }
 
@@ -123,7 +119,6 @@ struct run_pool_t {
     ~run_pool_t() {
         while (!runs.empty()) {
             auto *run = runs.front();
-            fclose(run->file);
             runs.pop();
             delete run;
         }
@@ -168,15 +163,12 @@ struct merger_t {
 
     void merge(FILE *files[], size_t rank, FILE *result) {
         struct input { FILE *file; uint64_t val; uint64_t size; bool read;} *inputs = new input[rank];
+        uint64_t ressiz = 0;
 
         for (size_t i = 0; i < rank; i++) {
             auto &inp = inputs[i];
             inp = {files[i], 0, 0, false};
             fread(&inp.size, sizeof inp.size, 1, inp.file);
-        }
-        uint64_t ressiz = 0;
-        for (size_t i = 0; i < rank; i++) {
-            auto &inp = inputs[i];
             ressiz += inp.size;
         }
         fwrite(&ressiz, sizeof ressiz, 1, result);
@@ -208,10 +200,11 @@ struct merger_t {
 
     void do_merge_sort(FILE *in, FILE *out, size_t rank = DEFAULT_MERGE_RANK) {
         split_into_runs(in);
-        size_t block_size = ram_size / (rank + 1);
+        size_t block_size = ram_size / 2 / (rank);
+        size_t result_block_size = ram_size / 2;
         auto *result_block = ram + rank * block_size;
 
-        run_t *result = runs->get(result_block, sizeof *ram, block_size);
+        run_t *result = runs->get(result_block, sizeof *ram, result_block_size);
 
         if (runs->size() == 0) {
             // should never happen since N > 1
@@ -237,7 +230,7 @@ struct merger_t {
             }
             result = used_runs[0];
             freopen(result->get_name(), "rb+", result->file);
-            setvbuf(result->file, (char *) block_start, _IOFBF, block_size * sizeof *block_start);
+            setvbuf(result->file, (char *) block_start, _IOFBF, result_block_size * sizeof *block_start);
         }
         used_runs[0] = runs->get(ram, sizeof *ram, ram_size);
         merge(&used_runs[0]->file, 1, out);

@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.12)
 project(ext_sort)
 
 set(CMAKE_CXX_STANDARD 14)
-add_compile_definitions(DEFAULT_MEMORY_SIZE=16)
+add_compile_definitions(DEFAULT_MEMORY_SIZE=2048)
+add_compile_definitions(DEFAULT_MERGE_RANK=8)
+add_compile_definitions(_LOCAL_TEST=1)
 
 add_compile_options(-Wpedantic)
 add_executable(ext_sort.out main.cpp)
