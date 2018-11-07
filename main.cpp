@@ -11,6 +11,10 @@
 #define DEFAULT_MEMORY_SIZE (512)
 #endif
 
+#ifndef DEFAULT_MERGE_RANK
+#define DEFAULT_MERGE_RANK 5
+#endif
+
 #ifndef DEFAULT_BLOCK_SIZE
 #define DEFAULT_BLOCK_SIZE (DEFAULT_MEMORY_SIZE >> 2)
 #endif
@@ -132,15 +136,11 @@ struct merger_t {
     uint64_t *ram;
     size_t block_size;
     size_t ram_size;
-    run_pool_t *outs;
-    run_pool_t *ins;
     run_pool_t *runs;
 
     explicit merger_t(size_t ram_size) :
             block_size(ram_size / 4),
             ram_size(ram_size),
-            outs(nullptr),
-            ins(nullptr),
             runs(nullptr)
     {
         ram = new uint64_t[ram_size];
@@ -206,16 +206,12 @@ struct merger_t {
         delete[] inputs;
     }
 
-    void do_merge_sort(FILE *in, FILE *out) {
+    void do_merge_sort(FILE *in, FILE *out, size_t rank = DEFAULT_MERGE_RANK) {
         split_into_runs(in);
-
-        const size_t rank = 2;
         size_t block_size = ram_size / (rank + 1);
         auto *result_block = ram + rank * block_size;
 
         run_t *result = runs->get(result_block, sizeof *ram, block_size);
-        run_t *left = nullptr;
-        run_t *right = nullptr;
 
         if (runs->size() == 0) {
             // should never happen since N > 1
@@ -228,8 +224,8 @@ struct merger_t {
         while (runs->size() > 1) {
             size_t files_cnt = 0;
             uint64_t *block_start = ram;
-//
-            for (files_cnt = 0; (files_cnt < rank) && (runs->size() != 0); files_cnt++, block_start += block_size) {
+
+            for (; (files_cnt < rank) && (runs->size() != 0); files_cnt++, block_start += block_size) {
                 used_runs[files_cnt] = runs->get(block_start, sizeof *block_start, block_size);
                 files[files_cnt] = used_runs[files_cnt]->file;
             }
@@ -243,8 +239,12 @@ struct merger_t {
             freopen(result->get_name(), "rb+", result->file);
             setvbuf(result->file, (char *) block_start, _IOFBF, block_size * sizeof *block_start);
         }
-        left = runs->get(ram, sizeof *ram, ram_size);
-        merge(&left->file, 1, out);
+        used_runs[0] = runs->get(ram, sizeof *ram, ram_size);
+        merge(&used_runs[0]->file, 1, out);
+        runs->release(used_runs[0]);
+        runs->release(result);
+
+        delete[] used_runs;
         delete[] files;
     }
 
