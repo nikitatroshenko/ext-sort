@@ -38,15 +38,20 @@ int cmp_ll(const void *l, const void *r)
 }
 
 #ifndef MAX_PATH
-#define MAX_PATH 512
+#define MAX_PATH 20
 #endif
 
 struct run_t {
     FILE *file;
-    char name[MAX_PATH];
+    int id;
 
-    run_t() {
-        memset(name, 0, MAX_PATH);
+    explicit run_t(int id): file(nullptr), id(id) {}
+
+    const char *get_name() {
+        static char name[MAX_PATH] {};
+
+        sprintf(name, RUN_NAME_PATTERN, id);
+        return name;
     }
 };
 
@@ -62,10 +67,11 @@ struct run_pool_t {
         const uint64_t zero = 0;
 
         for (size_t i = 0; i < size; i++) {
-            auto run = new run_t();
-            sprintf(run->name, RUN_NAME_PATTERN, id_counter++);
+            auto run = new run_t(id_counter++);
+            const char *name = run->get_name();
             
-            run->file = fopen(run->name, "wb+");
+            run->file = fopen(name, "wb+");
+            setvbuf(run->file, nullptr, _IONBF, 0);
             fwrite(&zero, sizeof zero, 1, run->file);
             fclose(run->file);
             pool->runs.push(run);
@@ -75,7 +81,8 @@ struct run_pool_t {
 
     run_t *get() {
         auto run = runs.front();
-        run->file = fopen(run->name, "rb+");
+        run->file = fopen(run->get_name(), "rb+");
+        setvbuf(run->file, nullptr, _IONBF, 0);
         fseek(run->file, 0, SEEK_SET);
         runs.pop();
         return run;
