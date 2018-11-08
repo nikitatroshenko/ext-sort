@@ -8,7 +8,7 @@
 #include <algorithm>
 
 #ifndef DEFAULT_MEMORY_SIZE
-#define DEFAULT_MEMORY_SIZE (2048)
+#define DEFAULT_MEMORY_SIZE (4096)
 #endif
 
 #ifndef DEFAULT_MERGE_RANK
