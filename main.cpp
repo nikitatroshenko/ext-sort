@@ -5,9 +5,14 @@
 #include <cassert>
 #include <cmath>
 #include <queue>
+#include <algorithm>
 
 #ifndef DEFAULT_MEMORY_SIZE
-#define DEFAULT_MEMORY_SIZE (512)
+#define DEFAULT_MEMORY_SIZE (4096)
+#endif
+
+#ifndef DEFAULT_MERGE_RANK
+#define DEFAULT_MERGE_RANK 8
 #endif
 
 #ifndef DEFAULT_BLOCK_SIZE
@@ -82,17 +87,20 @@ struct run_pool_t {
             run->file = fopen(name, "wb+");
             setvbuf(run->file, nullptr, _IONBF, 0);
             fwrite(&zero, sizeof zero, 1, run->file);
-            fclose(run->file);
-            pool->runs.push(run);
+            pool->put(run);
         }
         return pool;
     }
 
     run_t *get() {
+        return get(nullptr, 0, 0);
+    }
+
+    run_t *get(void *buf, size_t element_size, size_t elements_cnt) {
         auto run = runs.front();
         run->file = fopen(run->get_name(), "rb+");
-        setvbuf(run->file, nullptr, _IONBF, 0);
-        fseek(run->file, 0, SEEK_SET);
+        size_t buf_size = element_size * elements_cnt;
+        setvbuf(run->file, (char *) buf, buf_size ? _IOFBF : _IONBF, buf_size);
         runs.pop();
         return run;
     }
@@ -104,8 +112,6 @@ struct run_pool_t {
 
     void release(run_t *run) {
         fclose(run->file);
-        // remove(run->name);
-
         delete run;
     }
 
@@ -116,7 +122,6 @@ struct run_pool_t {
     ~run_pool_t() {
         while (!runs.empty()) {
             auto *run = runs.front();
-            fclose(run->file);
             runs.pop();
             delete run;
         }
@@ -247,96 +252,83 @@ struct merger_t {
         }
     }
 
-    void merge(FILE *left, FILE *right, FILE *result) {
-        auto block_size = ram_size / 2 / 2;
-        auto *left_block_t = block_t::create_input(left, ram, block_size);
-        auto *right_block_t = block_t::create_input(right, ram + block_size, block_size);
-        auto *result_block_t = block_t::create_output(
-                result,
-                left_block_t->external_size + right_block_t->external_size,
-                ram + ram_size / 2,
-                ram_size / 2);
+    void merge(FILE *files[], size_t rank, FILE *result) {
+        struct input { FILE *file; uint64_t val; uint64_t size; bool read;} *inputs = new input[rank];
+        uint64_t ressiz = 0;
 
-        while ((!left_block_t->empty() || left_block_t->has_external_data())
-               && (!right_block_t->empty() || right_block_t->has_external_data())) {
-            if (left_block_t->empty()) {
-                left_block_t->read_next_block();
-            }
-            if (right_block_t->empty()) {
-                right_block_t->read_next_block();
-            }
-            while (!left_block_t->empty() && !right_block_t->empty()) {
-                if (*left_block_t->internal_storage_ptr <= *right_block_t->internal_storage_ptr) {
-                    result_block_t->push(left_block_t->next());
-                } else {
-                    result_block_t->push(right_block_t->next());
-                }
-                if (result_block_t->full()) {
-                    result_block_t->flush();
-                }
-            }
+        for (size_t i = 0; i < rank; i++) {
+            auto &inp = inputs[i];
+            inp = {files[i], 0, 0, false};
+            fread(&inp.size, sizeof inp.size, 1, inp.file);
+            ressiz += inp.size;
         }
-        if (!result_block_t->empty()) {
-            result_block_t->flush();
-        }
-        if (!left_block_t->empty()) {
-            left_block_t->move_to(result_block_t);
-        }
-        if (!right_block_t->empty()) {
-            right_block_t->move_to(result_block_t);
-        }
-        left_block_t->resize_buffer(ram, ram_size);
-        right_block_t->resize_buffer(ram, ram_size);
-//        fflush(result_block_t->external_storage);
-        while (left_block_t->has_external_data()) {
-            left_block_t->read_next_block();
-            left_block_t->move_to(result_block_t);
-        }
-        while (right_block_t->has_external_data()) {
-            right_block_t->read_next_block();
-            right_block_t->move_to(result_block_t);
-        }
+        fwrite(&ressiz, sizeof ressiz, 1, result);
 
-        delete left_block_t;
-        delete right_block_t;
-        delete result_block_t;
+        while (true) {
+            input *min_elem = nullptr;
+            for (size_t i = 0; i < rank; i++) {
+                auto &inp = inputs[i];
+                if (!inp.read && !inp.size) {
+                    continue;
+                }
+                if (!inp.read) {
+                    fread(&inp.val, sizeof inp.val, 1, inp.file);
+                    inp.read = true;
+                    inp.size--;
+                }
+                if ((min_elem == nullptr) || (inp.val < min_elem->val)) {
+                    min_elem = &inp;
+                }
+            }
+            if (min_elem == nullptr) {
+                break;
+            }
+            fwrite(&min_elem->val, sizeof min_elem->val, 1, result);
+            min_elem->read = false;
+        }
     }
 
-    void do_merge_sort(FILE *in, FILE *out) {
+    void do_merge_sort(FILE *in, FILE *out, size_t rank = DEFAULT_MERGE_RANK) {
         split_into_runs(in);
+        size_t block_size = ram_size / 2 / (rank);
+        size_t result_block_size = ram_size / 2;
+        auto *result_block = ram + rank * block_size;
 
-        run_t *result = runs->get();
-        run_t *left;
-        run_t *right;
+        run_t *result = runs->get(result_block, sizeof *ram, result_block_size);
 
         if (runs->size() == 0) {
+            // should never happen since N > 1
             fseek(in, 0, SEEK_SET);
-            merge(in, result->file, out);
+            merge(&in, 1, out);
             return;
         }
-        if (runs->size() == 1) {
-            left = runs->get();
-            merge(left->file, result->file, out); // result is a file with empty sequence;
-            runs->release(left);
-            runs->release(result);
-            return;
-        }
-        while (runs->size() > 2) {
-            left = runs->get();
-            right = runs->get();
+        FILE **files = new FILE *[rank];
+        auto **used_runs = new run_t*[rank];
+        while (runs->size() > 1) {
+            size_t files_cnt = 0;
+            uint64_t *block_start = ram;
 
-            merge(left->file, right->file, result->file);
+            for (; (files_cnt < rank) && (runs->size() != 0); files_cnt++, block_start += block_size) {
+                used_runs[files_cnt] = runs->get(block_start, sizeof *block_start, block_size);
+                files[files_cnt] = used_runs[files_cnt]->file;
+            }
+
+            merge(files, files_cnt, result->file);
             runs->put(result);
-            runs->release(left);
-            result = right;
-            fseek(result->file, 0, SEEK_SET);
+            for (size_t i = 1; i < files_cnt; i++) {
+                runs->release(used_runs[i]);
+            }
+            result = used_runs[0];
+            freopen(result->get_name(), "rb+", result->file);
+            setvbuf(result->file, (char *) block_start, _IOFBF, result_block_size * sizeof *block_start);
         }
-        left = runs->get();
-        right = runs->get();
-        merge(left->file, right->file, out);
+        used_runs[0] = runs->get(ram, sizeof *ram, ram_size);
+        merge(&used_runs[0]->file, 1, out);
+        runs->release(used_runs[0]);
         runs->release(result);
-        runs->release(left);
-        runs->release(right);
+
+        delete[] used_runs;
+        delete[] files;
     }
 
     ~merger_t() {

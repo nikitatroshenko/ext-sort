@@ -46,5 +46,5 @@ elif [[ $(bc <<<"$ELAPSED>1") -eq 1 ]]
 then
     echo -e "[${ORANGE} TLE ${NC}]\t ${ELAPSED}s for ${1}"
 else
-    echo -e "[${GREEN} OK  ${NC}]\tfor ${1}"
+    echo -e "[${GREEN} OK  ${NC}]\t ${ELAPSED}s for ${1}"
 fi
